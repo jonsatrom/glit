@@ -39,6 +39,7 @@
     max-width:100%;max-height:100%;image-rendering:pixelated;display:block;
   }
   #previewPane audio{width:90%}
+  #previewPane iframe{width:100%;height:100%;border:0;background:#fff}
   #dropHint{
     position:absolute;inset:0;display:flex;flex-direction:column;gap:.6rem;
     align-items:center;justify-content:center;text-align:center;color:var(--dim);
@@ -131,6 +132,7 @@
         <button class="util" id="resetBtn" disabled>RESET</button>
         <button id="exportBtn" disabled>EXPORT</button>
         <label class="tog" id="crcTog" style="display:none"><input type="checkbox" id="crcFix" checked>PNG CRC FIX</label>
+        <label class="tog" id="structTog" style="display:none"><input type="checkbox" id="structLock" checked>STRUCT LOCK</label>
       </div>
     </div>
   </section>
@@ -170,8 +172,8 @@ const BRUSHES = {
   FLIP:     (d,a,b)=>{ const n=b-a, hits=Math.max(1,n>>3);
                        for(let k=0;k<hits;k++){ const i=a+rnd(n); d[i]^=1<<rnd(8); } },
   CLONE:    (d,a,b)=>{ const n=b-a, max=d.length-n;
-                       if(max<=lockEnd) return;
-                       const src=lockEnd+rnd(max-lockEnd);
+                       if(max<=0) return;
+                       const src=rnd(max);          // reading locked bytes is fine
                        d.copyWithin(a, src, src+n); },
   REVERSE:  (d,a,b)=>{ for(let i=a,j=b-1;i<j;i++,j--){ const t=d[i];d[i]=d[j];d[j]=t; } },
   SORT:     (d,a,b)=>{ d.subarray(a,b).sort(); },
@@ -188,45 +190,150 @@ for(const name of Object.keys(BRUSHES)){
   brushRow.appendChild(btn);
 }
 
-/* ---------------- format-aware header lock ---------------- */
-function guessHeaderEnd(d){
+/* ---------------- structure analysis ----------------------------------
+   Maps a file's anatomy so multifaceted formats survive scrubbing:
+     regions     [{a,b,label}]  — named spans, drawn as boundary ticks and
+                                  shown in the hex readout
+     structLocks [[a,b],...]    — spans that are structurally fatal to touch
+                                  (PDF xref/trailer at the TAIL, every
+                                  non-mdat box in HEIC/MP4, chunk headers…),
+                                  locked while STRUCT LOCK is on
+     headEnd                    — default head-lock slider position       */
+function analyze(d){
+  const len=d.length;
   const u32=(i)=>(d[i]<<24|d[i+1]<<16|d[i+2]<<8|d[i+3])>>>0;
-  // JPEG: protect through the Start-Of-Scan marker so it still decodes
-  if(d[0]===0xFF&&d[1]===0xD8){
-    for(let i=2;i<d.length-1;i++) if(d[i]===0xFF&&d[i+1]===0xDA){
-      return Math.min(d.length, i+2+((d[i+2]<<8|d[i+3])||0));
+  const regions=[], locks=[];
+  const R=(a,b,label)=>{ if(b>a) regions.push({a,b:Math.min(b,len),label}); };
+  const L=(a,b)=>{ if(b>a) locks.push([a,Math.min(b,len)]); };
+  const out=(headEnd)=>({regions,structLocks:locks,headEnd:Math.min(headEnd,len)});
+  // scan for an ascii needle; returns all match offsets
+  const findAll=(s,limit=Infinity)=>{
+    const n=[...s].map(c=>c.charCodeAt(0)), hits=[];
+    outer: for(let i=0;i<=len-n.length && hits.length<limit;i++){
+      for(let k=0;k<n.length;k++) if(d[i+k]!==n[k]) continue outer;
+      hits.push(i);
     }
-    return 512;
+    return hits;
+  };
+
+  // JPEG: walk markers to Start-Of-Scan; lock through the SOS header
+  if(d[0]===0xFF&&d[1]===0xD8){
+    const NAMES={0xD8:"SOI",0xDB:"DQT",0xC0:"SOF0",0xC2:"SOF2",0xC4:"DHT",
+                 0xDA:"SOS",0xDD:"DRI",0xFE:"COM",0xD9:"EOI"};
+    let i=2, head=512;
+    R(0,2,"SOI");
+    while(i+4<=len && d[i]===0xFF){
+      const m=d[i+1], sz=(d[i+2]<<8|d[i+3]);
+      const name = NAMES[m] || (m>=0xE0&&m<=0xEF ? "APP"+(m-0xE0) : "FF"+m.toString(16));
+      R(i,i+2+sz,name);
+      if(m===0xDA){ head=i+2+sz; R(head,len,"scan"); break; }
+      i+=2+sz;
+    }
+    return out(head);
   }
-  // PNG: signature + IHDR chunk
-  if(d[0]===0x89&&d[1]===0x50) return Math.min(d.length,33);
+  // PNG: walk chunks; sig+IHDR locked by head; IEND struct-locked
+  if(d[0]===0x89&&d[1]===0x50){
+    R(0,8,"sig");
+    let off=8;
+    while(off+12<=len){
+      const csz=u32(off), end=off+12+csz;
+      const type=String.fromCharCode(d[off+4],d[off+5],d[off+6],d[off+7]);
+      R(off,end,type);
+      if(type==="IEND") L(off,end);
+      if(end<=off) break;
+      off=end;
+    }
+    return out(33);
+  }
   // GIF: header + logical screen descriptor + global color table
   if(d[0]===0x47&&d[1]===0x49&&d[2]===0x46){
     let end=13;
     if(d[10]&0x80) end += 3*(2<<(d[10]&7));
-    return Math.min(d.length,end);
+    R(0,13,"header"); R(13,end,"palette"); R(end,len,"frames");
+    return out(end);
   }
-  // RIFF (WAV/WEBP/AVI): protect the first 64 bytes of headers
-  if(d[0]===0x52&&d[1]===0x49&&d[2]===0x46&&d[3]===0x46) return Math.min(d.length,64);
-  // MP3 with ID3v2: skip the whole tag + first frame header
+  // RIFF (WAV/WEBP/AVI): walk chunks; lock chunk headers + all of fmt
+  if(d[0]===0x52&&d[1]===0x49&&d[2]===0x46&&d[3]===0x46){
+    R(0,12,"RIFF"); L(0,12);
+    let off=12;
+    while(off+8<=len){
+      const id=String.fromCharCode(d[off],d[off+1],d[off+2],d[off+3]).trim();
+      const csz=(d[off+4]|d[off+5]<<8|d[off+6]<<16|d[off+7]<<24)>>>0;
+      const end=off+8+csz+(csz&1);
+      R(off,Math.min(end,len),id);
+      L(off,off+8);
+      if(id==="fmt") L(off,end);
+      if(end<=off) break;
+      off=end;
+    }
+    return out(12);
+  }
+  // MP3 with ID3v2: the whole tag is head; frames after
   if(d[0]===0x49&&d[1]===0x44&&d[2]===0x33){
     const sz=(d[6]<<21|d[7]<<14|d[8]<<7|d[9]);
-    return Math.min(d.length, 10+sz+4);
+    R(0,10+sz,"ID3"); R(10+sz,len,"frames");
+    return out(Math.min(len,10+sz+4));
   }
-  // MP4/MOV: walk boxes, protect everything before mdat's payload
-  if(d.length>12 && d[4]===0x66&&d[5]===0x74&&d[6]===0x79&&d[7]===0x70){
+  // ISOBMFF (MP4/MOV/M4A/HEIC/HEIF/AVIF): walk top-level boxes.
+  // Only mdat payload is safe to corrupt — iloc/iinf/moov offsets in the
+  // other boxes are load-bearing, so every non-mdat box is struct-locked.
+  if(len>12 && d[4]===0x66&&d[5]===0x74&&d[6]===0x79&&d[7]===0x70){
     let off=0;
-    while(off+8<=d.length){
-      let size=u32(off);
+    while(off+8<=len){
+      let size=u32(off), hdr=8;
       const type=String.fromCharCode(d[off+4],d[off+5],d[off+6],d[off+7]);
-      if(type==="mdat") return Math.min(d.length, off+8+64);
-      if(size===1) size=Number((BigInt(u32(off+8))<<32n)|BigInt(u32(off+12)));
-      if(size<8) break;
-      off+=size;
+      if(size===1){ size=Number((BigInt(u32(off+8))<<32n)|BigInt(u32(off+12))); hdr=16; }
+      else if(size===0) size=len-off;
+      if(size<hdr) break;
+      const end=Math.min(len,off+size);
+      R(off,end,type);
+      if(type==="mdat") L(off,off+hdr); else L(off,end);
+      off=end;
     }
-    return Math.min(d.length,4096);
+    return out(16);
   }
-  return Math.min(d.length,128);
+  // PDF: header line + last startxref→EOF are fatal; streams are the meat
+  if(d[0]===0x25&&d[1]===0x50&&d[2]===0x44&&d[3]===0x46){
+    R(0,9,"%PDF"); L(0,9);
+    const sx=findAll("startxref");
+    if(sx.length){ const t=sx[sx.length-1]; R(t,len,"trailer"); L(t,len); }
+    const xr=findAll("xref");
+    for(const x of xr) if(!sx.includes(x-5)) R(x,x+4,"xref");
+    const ss=findAll("stream"), es=findAll("endstream");
+    let e=0, n=0;
+    for(const s of ss){
+      if(es.includes(s-3)) continue;            // "stream" inside "endstream"
+      while(e<es.length && es[e]<s) e++;
+      if(e<es.length){ R(s+7,es[e],"stream "+(++n)); e++; }
+    }
+    return out(9);
+  }
+  return out(Math.min(len,128));
+}
+let regions=[], structLocks=[];
+
+/* merged view of head lock + structure locks, kept sorted+disjoint */
+let locks=[];
+function rebuildLocks(){
+  const src=[];
+  if(lockEnd>0) src.push([0,lockEnd]);
+  if($("structLock").checked) src.push(...structLocks);
+  src.sort((x,y)=>x[0]-y[0]);
+  locks=[];
+  for(const r of src){
+    const last=locks[locks.length-1];
+    if(last && r[0]<=last[1]) last[1]=Math.max(last[1],r[1]);
+    else locks.push([r[0],r[1]]);
+  }
+}
+function lockedAt(off){
+  for(const [a,b] of locks){ if(off<a) return false; if(off<b) return true; }
+  return false;
+}
+function regionAt(off){
+  let best=null;
+  for(const r of regions) if(off>=r.a&&off<r.b) best=r;   // innermost wins
+  return best;
 }
 
 /* ---------------- PNG CRC repair (classic hand-glitch move) ------------
@@ -294,7 +401,12 @@ function paintField(fromByte=0, toByte=Infinity){
   const p1 = Math.min(total, Math.ceil(Math.min(toByte,len)/len*total));
   for(let p=p0;p<p1;p++){
     const off = Math.min(len-1, Math.floor(p*len/total));
-    px[p] = off<lockEnd ? LOCK_COL : PALETTE[data[off]];
+    px[p] = lockedAt(off) ? LOCK_COL : PALETTE[data[off]];
+  }
+  // structure boundary ticks so you can see the file's anatomy
+  for(const r of regions){
+    const p = Math.floor(r.a/len*total);
+    if(p>=p0-2 && p<p1) for(let k=0;k<2;k++) if(p+k<total) px[p+k]=0xFFFFFFFF;
   }
   fctx.putImageData(fimg,0,0);
 }
@@ -311,17 +423,33 @@ function brushBytes(){
   const px = +$("brushSize").value;               // brush size in field pixels
   return Math.max(4, Math.round(px*px*bytesPerPx));  // area-ish scaling feels right
 }
+/* apply a brush to [a,b) minus any locked spans; records undo patches */
+function corruptRange(a,b,fn,patches){
+  a=Math.max(0,a); b=Math.min(data.length,b);
+  let hit=false, cur=a;
+  const segs=[];
+  for(const [la,lb] of locks){
+    if(lb<=cur) continue;
+    if(la>=b) break;
+    if(la>cur) segs.push([cur,Math.min(la,b)]);
+    cur=Math.max(cur,lb);
+    if(cur>=b) break;
+  }
+  if(cur<b) segs.push([cur,b]);
+  for(const [sa,sb] of segs){
+    if(sb-sa<2) continue;
+    patches.push({off:sa, bytes:data.slice(sa,sb)});
+    fn(data,sa,sb);
+    hit=true;
+    if(!strokeDirty) strokeDirty={min:sa,max:sb};
+    else { strokeDirty.min=Math.min(strokeDirty.min,sa); strokeDirty.max=Math.max(strokeDirty.max,sb); }
+    paintField(sa,sb);
+  }
+  return hit;
+}
 function applyBrushAt(off){
   const half = brushBytes()>>1;
-  let a = Math.max(lockEnd, off-half);
-  let b = Math.min(data.length, off+half);
-  if(b-a<2) return;
-  // record for undo before mutating
-  strokePatches.push({off:a, bytes:data.slice(a,b)});
-  BRUSHES[brushName](data,a,b);
-  if(!strokeDirty) strokeDirty={min:a,max:b};
-  else { strokeDirty.min=Math.min(strokeDirty.min,a); strokeDirty.max=Math.max(strokeDirty.max,b); }
-  paintField(a,b);
+  if(!corruptRange(off-half, off+half, BRUSHES[brushName], strokePatches)) { peekHex(off); return; }
   peekHex(off);
   schedulePreview();
 }
@@ -365,14 +493,16 @@ function peekHex(off){
     const h=data[i].toString(16).padStart(2,"0");
     s += (i===off) ? `<em>${h}</em> ` : h+" ";
   }
+  const r = regionAt(off);
+  const where = (r?` · <em>${r.label}</em>`:"") + (lockedAt(off)?" · locked":"");
   $("hexPeek").innerHTML =
-    `0x${off.toString(16).padStart(8,"0")} · ${s}· ${brushName.toLowerCase()}`;
+    `0x${off.toString(16).padStart(8,"0")} · ${s}· ${brushName.toLowerCase()}${where}`;
 }
 
 /* ---------------- live preview ---------------- */
 let previewTimer=0, previewPending=false;
 function schedulePreview(force){
-  const delay = previewKind==="img" ? 80 : 350;   // decode cost differs
+  const delay = previewKind==="img" ? 80 : previewKind==="pdf" ? 600 : 350; // decode cost differs
   if(previewTimer && !force){ previewPending=true; return; }
   clearTimeout(previewTimer);
   previewTimer = setTimeout(()=>{
@@ -395,6 +525,8 @@ function renderPreview(){
 
   if(previewKind==="img"){
     mediaEl.onerror = ()=>{ $("brokenBadge").style.display="block"; };
+    mediaEl.src = blobURL;
+  } else if(previewKind==="pdf"){
     mediaEl.src = blobURL;
   } else if(previewKind==="audio" || previewKind==="video"){
     const t = mediaEl.currentTime||0, playing = !mediaEl.paused && !mediaEl.ended;
@@ -419,15 +551,20 @@ function loadFile(file){
     ["chaosBtn","resetBtn","exportBtn"].forEach(id=>$(id).disabled=false);
     $("dropHint").style.display="none";
 
-    headerGuess = guessHeaderEnd(data);
-    lockEnd = headerGuess;
+    const st = analyze(data);
+    regions = st.regions; structLocks = st.structLocks;
+    headerGuess = st.headEnd; lockEnd = headerGuess;
+    $("structTog").style.display = structLocks.length ? "flex" : "none";
+    rebuildLocks();
     syncLockSlider();
     $("crcTog").style.display = isPng() ? "flex" : "none";
 
     // build the right preview element
     if(mediaEl) mediaEl.remove();
     const t = fileType, n = fileName.toLowerCase();
-    if(t.startsWith("image/") || /\.(jpe?g|png|gif|webp|bmp|ico)$/.test(n)){
+    if(t==="application/pdf" || /\.pdf$/.test(n)){
+      previewKind="pdf"; mediaEl=document.createElement("iframe");
+    } else if(t.startsWith("image/") || /\.(jpe?g|png|gif|webp|bmp|ico|heic|heif|avif)$/.test(n)){
       previewKind="img"; mediaEl=document.createElement("img");
     } else if(t.startsWith("audio/") || /\.(mp3|wav|ogg|flac|m4a)$/.test(n)){
       previewKind="audio"; mediaEl=document.createElement("audio"); mediaEl.controls=true; mediaEl.loop=true;
@@ -467,8 +604,9 @@ $("lockSlider").addEventListener("input", ()=>{
   const max = Math.max(headerGuess*4, 256);
   lockEnd = Math.min(data?data.length:0, Math.round(+$("lockSlider").value/100*max));
   $("lockOut").textContent = lockEnd+"b";
-  paintField();
+  rebuildLocks(); paintField();
 });
+$("structLock").addEventListener("change", ()=>{ rebuildLocks(); paintField(); });
 
 /* ---------------- utility buttons ---------------- */
 $("undoBtn").onclick = ()=>{
@@ -480,21 +618,23 @@ $("undoBtn").onclick = ()=>{
 };
 
 $("chaosBtn").onclick = ()=>{
-  // one-shot: random brush hits sprayed across the unlocked region
+  // one-shot: random brush hits sprayed anywhere unlocked
   const patches=[]; const names=Object.keys(BRUSHES);
-  const span = data.length-lockEnd;
-  if(span<16) return;
+  const len=data.length;
+  if(len<32) return;
   const hits = 6+rnd(10);
+  strokeDirty=null;
   for(let k=0;k<hits;k++){
-    const n = Math.max(8, rnd(span>>4));
-    const a = lockEnd + rnd(span-n), b=a+n;
-    patches.push({off:a, bytes:data.slice(a,b)});
-    BRUSHES[names[rnd(names.length)]](data,a,b);
+    const n = Math.max(8, rnd(len>>4));
+    const a = rnd(len-n);
+    corruptRange(a, a+n, BRUSHES[names[rnd(names.length)]], patches);
   }
-  undoStack.push(patches);
-  if(undoStack.length>UNDO_MAX) undoStack.shift();
-  $("undoBtn").disabled=false;
-  paintField(); schedulePreview(true);
+  if(patches.length){
+    undoStack.push(patches);
+    if(undoStack.length>UNDO_MAX) undoStack.shift();
+    $("undoBtn").disabled=false;
+  }
+  schedulePreview(true);
 };
 
 $("resetBtn").onclick = ()=>{
