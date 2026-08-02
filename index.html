@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>GLIT — touch the data layer</title>
+<style>
+  :root{
+    --bg:#0a0a0c; --panel:#131318; --ink:#e8e8ee; --dim:#8a8a99;
+    --hot:#ff2e88; --acid:#a6ff00; --cyan:#00e5ff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    background:var(--bg);color:var(--ink);font-family:var(--mono);
+    display:flex;flex-direction:column;overflow:hidden;touch-action:none;
+  }
+  header{
+    display:flex;align-items:baseline;gap:.75rem;padding:.5rem .75rem;
+    border-bottom:1px solid #222;flex:none;
+  }
+  header h1{font-size:1rem;letter-spacing:.35em;color:var(--acid)}
+  header .tag{font-size:.6rem;color:var(--dim)}
+  header .file{margin-left:auto;font-size:.65rem;color:var(--cyan);
+    max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ---------- layout ---------- */
+  main{flex:1;display:flex;flex-direction:column;min-height:0}
+  @media (min-width:820px){ main{flex-direction:row} }
+
+  #previewPane{
+    flex:1;min-height:0;min-width:0;display:flex;align-items:center;justify-content:center;
+    background:
+      repeating-conic-gradient(#101014 0% 25%, #0c0c10 0% 50%) 0 0/24px 24px;
+    position:relative;overflow:hidden;
+  }
+  #previewPane img,#previewPane video{
+    max-width:100%;max-height:100%;image-rendering:pixelated;display:block;
+  }
+  #previewPane audio{width:90%}
+  #dropHint{
+    position:absolute;inset:0;display:flex;flex-direction:column;gap:.6rem;
+    align-items:center;justify-content:center;text-align:center;color:var(--dim);
+    font-size:.8rem;line-height:1.7;padding:1rem;cursor:pointer;
+  }
+  #dropHint b{color:var(--acid);font-size:1.05rem;letter-spacing:.2em}
+  #brokenBadge{
+    position:absolute;top:.5rem;left:.5rem;font-size:.6rem;color:var(--hot);
+    background:#000a;padding:.2rem .45rem;border:1px solid var(--hot);display:none;
+  }
+  #hexPeek{
+    position:absolute;bottom:.4rem;left:.5rem;right:.5rem;font-size:.6rem;
+    color:var(--dim);pointer-events:none;white-space:nowrap;overflow:hidden;
+  }
+  #hexPeek em{color:var(--hot);font-style:normal}
+
+  #fieldPane{
+    flex:none;display:flex;flex-direction:column;min-width:0;
+    border-top:1px solid #222;
+  }
+  @media (min-width:820px){
+    #fieldPane{width:42%;max-width:560px;border-top:none;border-left:1px solid #222}
+  }
+  #fieldWrap{position:relative;flex:1;min-height:150px}
+  @media (max-width:819px){ #fieldWrap{height:32vh;flex:none} }
+  #field{
+    position:absolute;inset:0;width:100%;height:100%;display:block;
+    cursor:crosshair;touch-action:none;background:#000;
+  }
+  #fieldLabel{
+    position:absolute;top:.3rem;right:.4rem;font-size:.55rem;color:#555;
+    pointer-events:none;letter-spacing:.15em;
+  }
+
+  /* ---------- controls ---------- */
+  #controls{flex:none;padding:.45rem .5rem .65rem;display:flex;flex-direction:column;gap:.45rem;background:var(--panel)}
+  .row{display:flex;gap:.35rem;flex-wrap:wrap;align-items:center}
+  button,label.btn{
+    font-family:var(--mono);font-size:.62rem;letter-spacing:.08em;
+    background:#1c1c24;color:var(--ink);border:1px solid #33333f;
+    padding:.45rem .55rem;cursor:pointer;user-select:none;
+  }
+  button:active{transform:translateY(1px)}
+  .brush.on{background:var(--hot);border-color:var(--hot);color:#000;font-weight:700}
+  .util{color:var(--cyan)}
+  .util:disabled{opacity:.3;cursor:default}
+  #exportBtn{background:var(--acid);color:#000;border-color:var(--acid);font-weight:700}
+  .sl{display:flex;align-items:center;gap:.4rem;font-size:.58rem;color:var(--dim);flex:1;min-width:130px}
+  .sl input[type=range]{flex:1;accent-color:var(--hot);min-width:60px}
+  .sl output{color:var(--ink);min-width:4.2em;text-align:right}
+  .tog{display:flex;align-items:center;gap:.3rem;font-size:.58rem;color:var(--dim);cursor:pointer}
+  .tog input{accent-color:var(--acid)}
+  #fileInput{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>GLIT</h1><span class="tag">touch the data layer</span>
+  <span class="file" id="fileName"></span>
+</header>
+
+<main>
+  <section id="previewPane">
+    <div id="brokenBadge">DECODER CHOKED — data is still yours</div>
+    <div id="dropHint">
+      <b>DROP A FILE</b>
+      <span>jpg png gif webp bmp / mp3 wav ogg / mp4 webm — anything with bytes<br>
+      tap here to browse · everything stays in your browser<br>
+      scrub the data field below to corrupt · preview updates live</span>
+    </div>
+    <div id="hexPeek"></div>
+  </section>
+
+  <section id="fieldPane">
+    <div id="fieldWrap">
+      <canvas id="field"></canvas>
+      <span id="fieldLabel">RAW BYTES → PIXELS · DRAG TO CORRUPT</span>
+    </div>
+    <div id="controls">
+      <div class="row" id="brushRow"></div>
+      <div class="row">
+        <span class="sl">BRUSH <input type="range" id="brushSize" min="1" max="100" value="18"><output id="brushOut"></output></span>
+        <span class="sl">LOCK HEAD <input type="range" id="lockSlider" min="0" max="100" value="0"><output id="lockOut"></output></span>
+      </div>
+      <div class="row">
+        <label class="btn" for="fileInput">OPEN</label>
+        <input type="file" id="fileInput">
+        <button class="util" id="undoBtn" disabled>UNDO</button>
+        <button class="util" id="chaosBtn" disabled>CHAOS</button>
+        <button class="util" id="resetBtn" disabled>RESET</button>
+        <button id="exportBtn" disabled>EXPORT</button>
+        <label class="tog" id="crcTog" style="display:none"><input type="checkbox" id="crcFix" checked>PNG CRC FIX</label>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+/* GLIT — literal byte corruption with live preview.
+   No libraries, no server, no filters: every brush rewrites the actual file
+   bytes, then the browser is asked to decode whatever is left. */
+
+const $ = id => document.getElementById(id);
+const field = $("field"), fctx = field.getContext("2d");
+const previewPane = $("previewPane");
+
+let data = null;          // Uint8Array — the live, corrupted file
+let original = null;      // pristine copy for RESET
+let fileName = "", fileType = "";
+let lockEnd = 0;          // bytes [0, lockEnd) are protected
+let headerGuess = 0;      // format-aware suggestion
+let blobURL = null;
+let mediaEl = null;       // current img/audio/video element
+let previewKind = "none"; // img | audio | video | none
+let undoStack = [];       // [{patches:[{off, bytes}]}]
+let strokePatches = null; // patches for stroke in progress
+let strokeDirty = null;   // {min,max} touched range for repaint
+const UNDO_MAX = 40;
+
+/* ---------------- brushes: real byte surgery ---------------- */
+const rnd = n => (Math.random()*n)|0;
+
+const BRUSHES = {
+  SMEAR:    (d,a,b)=>{ const v=d[a]; d.fill(v,a,b); },
+  SCRAMBLE: (d,a,b)=>{ for(let i=b-1;i>a;i--){ const j=a+rnd(i-a+1),t=d[i];d[i]=d[j];d[j]=t; } },
+  STUTTER:  (d,a,b)=>{ const n=b-a, cs=Math.max(2,Math.min(n, 4+rnd(60)));
+                       for(let i=a+cs;i<b;i++) d[i]=d[a+((i-a)%cs)]; },
+  FLIP:     (d,a,b)=>{ const n=b-a, hits=Math.max(1,n>>3);
+                       for(let k=0;k<hits;k++){ const i=a+rnd(n); d[i]^=1<<rnd(8); } },
+  CLONE:    (d,a,b)=>{ const n=b-a, max=d.length-n;
+                       if(max<=lockEnd) return;
+                       const src=lockEnd+rnd(max-lockEnd);
+                       d.copyWithin(a, src, src+n); },
+  REVERSE:  (d,a,b)=>{ for(let i=a,j=b-1;i<j;i++,j--){ const t=d[i];d[i]=d[j];d[j]=t; } },
+  SORT:     (d,a,b)=>{ d.subarray(a,b).sort(); },
+  ZERO:     (d,a,b)=>{ d.fill(0,a,b); },
+};
+let brushName = "SMEAR";
+
+const brushRow = $("brushRow");
+for(const name of Object.keys(BRUSHES)){
+  const btn = document.createElement("button");
+  btn.textContent = name; btn.className = "brush"+(name===brushName?" on":"");
+  btn.onclick = ()=>{ brushName = name;
+    brushRow.querySelectorAll(".brush").forEach(x=>x.classList.toggle("on",x===btn)); };
+  brushRow.appendChild(btn);
+}
+
+/* ---------------- format-aware header lock ---------------- */
+function guessHeaderEnd(d){
+  const u32=(i)=>(d[i]<<24|d[i+1]<<16|d[i+2]<<8|d[i+3])>>>0;
+  // JPEG: protect through the Start-Of-Scan marker so it still decodes
+  if(d[0]===0xFF&&d[1]===0xD8){
+    for(let i=2;i<d.length-1;i++) if(d[i]===0xFF&&d[i+1]===0xDA){
+      return Math.min(d.length, i+2+((d[i+2]<<8|d[i+3])||0));
+    }
+    return 512;
+  }
+  // PNG: signature + IHDR chunk
+  if(d[0]===0x89&&d[1]===0x50) return Math.min(d.length,33);
+  // GIF: header + logical screen descriptor + global color table
+  if(d[0]===0x47&&d[1]===0x49&&d[2]===0x46){
+    let end=13;
+    if(d[10]&0x80) end += 3*(2<<(d[10]&7));
+    return Math.min(d.length,end);
+  }
+  // RIFF (WAV/WEBP/AVI): protect the first 64 bytes of headers
+  if(d[0]===0x52&&d[1]===0x49&&d[2]===0x46&&d[3]===0x46) return Math.min(d.length,64);
+  // MP3 with ID3v2: skip the whole tag + first frame header
+  if(d[0]===0x49&&d[1]===0x44&&d[2]===0x33){
+    const sz=(d[6]<<21|d[7]<<14|d[8]<<7|d[9]);
+    return Math.min(d.length, 10+sz+4);
+  }
+  // MP4/MOV: walk boxes, protect everything before mdat's payload
+  if(d.length>12 && d[4]===0x66&&d[5]===0x74&&d[6]===0x79&&d[7]===0x70){
+    let off=0;
+    while(off+8<=d.length){
+      let size=u32(off);
+      const type=String.fromCharCode(d[off+4],d[off+5],d[off+6],d[off+7]);
+      if(type==="mdat") return Math.min(d.length, off+8+64);
+      if(size===1) size=Number((BigInt(u32(off+8))<<32n)|BigInt(u32(off+12)));
+      if(size<8) break;
+      off+=size;
+    }
+    return Math.min(d.length,4096);
+  }
+  return Math.min(d.length,128);
+}
+
+/* ---------------- PNG CRC repair (classic hand-glitch move) ------------
+   Browsers refuse PNGs with bad chunk CRCs. Recomputing the CRCs keeps the
+   corruption but lets the decoder show it. */
+const CRC_T = (()=>{ const t=new Uint32Array(256);
+  for(let n=0;n<256;n++){ let c=n;
+    for(let k=0;k<8;k++) c = (c&1) ? 0xEDB88320 ^ (c>>>1) : c>>>1;
+    t[n]=c; } return t; })();
+function crc32(d,a,b){ let c=0xFFFFFFFF;
+  for(let i=a;i<b;i++) c = CRC_T[(c^d[i])&0xFF] ^ (c>>>8);
+  return (c^0xFFFFFFFF)>>>0; }
+function fixPngCrcs(src){
+  const d = src.slice(); let off=8;
+  while(off+12<=d.length){
+    const len=(d[off]<<24|d[off+1]<<16|d[off+2]<<8|d[off+3])>>>0;
+    const end=off+8+len;
+    if(end+4>d.length) break;
+    const c=crc32(d,off+4,end);
+    d[end]=c>>>24; d[end+1]=(c>>>16)&255; d[end+2]=(c>>>8)&255; d[end+3]=c&255;
+    off=end+4;
+  }
+  return d;
+}
+const isPng = ()=> data && data[0]===0x89 && data[1]===0x50;
+
+/* ---------------- data field: bytes → pixels ----------------
+   The whole file always fills the whole canvas: pixel p ↔ byte
+   floor(p·len/totalPx). bytesPerPx may be fractional for small files. */
+let bytesPerPx = 1, fieldW = 0, fieldH = 0;
+
+function sizeField(){
+  const r = field.parentElement.getBoundingClientRect();
+  const dpr = Math.min(devicePixelRatio||1, 2);
+  fieldW = Math.max(1, Math.round(r.width*dpr));
+  fieldH = Math.max(1, Math.round(r.height*dpr));
+  field.width = fieldW; field.height = fieldH;
+  if(data) { bytesPerPx = data.length/(fieldW*fieldH); paintField(); }
+}
+addEventListener("resize", sizeField);
+
+const img32 = ()=> new Uint32Array(fimg.data.buffer);
+let fimg = null;
+
+// byte value → color: zeros near-black, ascii-ish teal, high bytes hot pink→white
+function byteColor(v){
+  if(v===0) return 0xFF000000|0x101010;
+  const t=v/255;
+  let r,g,b;
+  if(v<128){ r=10+v; g=40+v; b=60+(v*1.2)|0; }
+  else { r=120+(t*135)|0; g=20+((t-0.5)*180)|0; b=110+(t*100)|0; }
+  return (0xFF000000 | (b<<16) | (g<<8) | r)>>>0;
+}
+const PALETTE = new Uint32Array(256);
+for(let v=0;v<256;v++) PALETTE[v]=byteColor(v);
+const LOCK_COL = 0xFF202020;
+
+function paintField(fromByte=0, toByte=Infinity){
+  if(!data) return;
+  if(!fimg || fimg.width!==fieldW || fimg.height!==fieldH)
+    fimg = fctx.createImageData(fieldW, fieldH);
+  const px = img32();
+  const total = fieldW*fieldH, len = data.length;
+  const p0 = Math.max(0, Math.floor(fromByte/len*total));
+  const p1 = Math.min(total, Math.ceil(Math.min(toByte,len)/len*total));
+  for(let p=p0;p<p1;p++){
+    const off = Math.min(len-1, Math.floor(p*len/total));
+    px[p] = off<lockEnd ? LOCK_COL : PALETTE[data[off]];
+  }
+  fctx.putImageData(fimg,0,0);
+}
+
+/* ---------------- touch/scrub → corruption ---------------- */
+function eventOffset(e){
+  const r = field.getBoundingClientRect();
+  const x = Math.min(fieldW-1, Math.max(0, (e.clientX-r.left)/r.width * fieldW))|0;
+  const y = Math.min(fieldH-1, Math.max(0, (e.clientY-r.top)/r.height * fieldH))|0;
+  const p = y*fieldW + x;
+  return Math.min(data.length-1, Math.floor(p*data.length/(fieldW*fieldH)));
+}
+function brushBytes(){
+  const px = +$("brushSize").value;               // brush size in field pixels
+  return Math.max(4, Math.round(px*px*bytesPerPx));  // area-ish scaling feels right
+}
+function applyBrushAt(off){
+  const half = brushBytes()>>1;
+  let a = Math.max(lockEnd, off-half);
+  let b = Math.min(data.length, off+half);
+  if(b-a<2) return;
+  // record for undo before mutating
+  strokePatches.push({off:a, bytes:data.slice(a,b)});
+  BRUSHES[brushName](data,a,b);
+  if(!strokeDirty) strokeDirty={min:a,max:b};
+  else { strokeDirty.min=Math.min(strokeDirty.min,a); strokeDirty.max=Math.max(strokeDirty.max,b); }
+  paintField(a,b);
+  peekHex(off);
+  schedulePreview();
+}
+
+let scrubbing=false, lastOff=-1;
+field.addEventListener("pointerdown", e=>{
+  if(!data) return;
+  field.setPointerCapture(e.pointerId);
+  scrubbing=true; strokePatches=[]; strokeDirty=null;
+  lastOff = eventOffset(e);
+  applyBrushAt(lastOff);
+});
+field.addEventListener("pointermove", e=>{
+  if(!scrubbing||!data) return;
+  const off = eventOffset(e);
+  // interpolate so fast swipes corrupt a continuous ribbon of bytes
+  const step = Math.max(1, brushBytes()>>1);
+  const dist = Math.abs(off-lastOff);
+  const n = Math.min(24, Math.ceil(dist/step));
+  for(let i=1;i<=n;i++) applyBrushAt(lastOff + (off-lastOff)*i/n | 0);
+  lastOff=off;
+});
+function endStroke(){
+  if(!scrubbing) return;
+  scrubbing=false;
+  if(strokePatches && strokePatches.length){
+    undoStack.push(strokePatches);
+    if(undoStack.length>UNDO_MAX) undoStack.shift();
+    $("undoBtn").disabled=false;
+  }
+  strokePatches=null;
+  schedulePreview(true);
+}
+field.addEventListener("pointerup", endStroke);
+field.addEventListener("pointercancel", endStroke);
+
+function peekHex(off){
+  const a=Math.max(0,off-8), b=Math.min(data.length,a+24);
+  let s="";
+  for(let i=a;i<b;i++){
+    const h=data[i].toString(16).padStart(2,"0");
+    s += (i===off) ? `<em>${h}</em> ` : h+" ";
+  }
+  $("hexPeek").innerHTML =
+    `0x${off.toString(16).padStart(8,"0")} · ${s}· ${brushName.toLowerCase()}`;
+}
+
+/* ---------------- live preview ---------------- */
+let previewTimer=0, previewPending=false;
+function schedulePreview(force){
+  const delay = previewKind==="img" ? 80 : 350;   // decode cost differs
+  if(previewTimer && !force){ previewPending=true; return; }
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(()=>{
+    previewTimer=0;
+    renderPreview();
+    if(previewPending){ previewPending=false; schedulePreview(); }
+  }, force?30:delay);
+}
+
+function currentBlob(){
+  const bytes = (isPng() && $("crcFix").checked) ? fixPngCrcs(data) : data;
+  return new Blob([bytes], {type: fileType||"application/octet-stream"});
+}
+
+function renderPreview(){
+  if(!data) return;
+  const old = blobURL;
+  blobURL = URL.createObjectURL(currentBlob());
+  $("brokenBadge").style.display="none";
+
+  if(previewKind==="img"){
+    mediaEl.onerror = ()=>{ $("brokenBadge").style.display="block"; };
+    mediaEl.src = blobURL;
+  } else if(previewKind==="audio" || previewKind==="video"){
+    const t = mediaEl.currentTime||0, playing = !mediaEl.paused && !mediaEl.ended;
+    mediaEl.onerror = ()=>{ $("brokenBadge").style.display="block"; };
+    mediaEl.onloadedmetadata = ()=>{
+      try{ mediaEl.currentTime = Math.min(t, mediaEl.duration||t); }catch(_){}
+      if(playing) mediaEl.play().catch(()=>{});
+    };
+    mediaEl.src = blobURL;
+  }
+  if(old) setTimeout(()=>URL.revokeObjectURL(old), 1000);
+}
+
+/* ---------------- file load ---------------- */
+function loadFile(file){
+  file.arrayBuffer().then(buf=>{
+    data = new Uint8Array(buf);
+    original = data.slice();
+    fileName = file.name; fileType = file.type;
+    $("fileName").textContent = `${fileName} · ${(data.length/1024).toFixed(1)}kb`;
+    undoStack=[]; $("undoBtn").disabled=true;
+    ["chaosBtn","resetBtn","exportBtn"].forEach(id=>$(id).disabled=false);
+    $("dropHint").style.display="none";
+
+    headerGuess = guessHeaderEnd(data);
+    lockEnd = headerGuess;
+    syncLockSlider();
+    $("crcTog").style.display = isPng() ? "flex" : "none";
+
+    // build the right preview element
+    if(mediaEl) mediaEl.remove();
+    const t = fileType, n = fileName.toLowerCase();
+    if(t.startsWith("image/") || /\.(jpe?g|png|gif|webp|bmp|ico)$/.test(n)){
+      previewKind="img"; mediaEl=document.createElement("img");
+    } else if(t.startsWith("audio/") || /\.(mp3|wav|ogg|flac|m4a)$/.test(n)){
+      previewKind="audio"; mediaEl=document.createElement("audio"); mediaEl.controls=true; mediaEl.loop=true;
+    } else if(t.startsWith("video/") || /\.(mp4|webm|mov|avi)$/.test(n)){
+      previewKind="video"; mediaEl=document.createElement("video");
+      mediaEl.controls=true; mediaEl.loop=true; mediaEl.muted=true; mediaEl.playsInline=true;
+    } else {
+      previewKind="none";
+      mediaEl=document.createElement("div");
+      mediaEl.style.cssText="color:#8a8a99;font-size:.7rem;padding:1rem;text-align:center";
+      mediaEl.textContent="no decoder for this type — scrub anyway, then EXPORT and open it elsewhere";
+    }
+    previewPane.insertBefore(mediaEl, $("hexPeek"));
+    sizeField();
+    renderPreview();
+  });
+}
+$("fileInput").addEventListener("change", e=>{ if(e.target.files[0]) loadFile(e.target.files[0]); });
+$("dropHint").addEventListener("click", ()=>$("fileInput").click());
+addEventListener("dragover", e=>e.preventDefault());
+addEventListener("drop", e=>{ e.preventDefault(); if(e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+
+/* ---------------- sliders ---------------- */
+function syncBrushOut(){
+  $("brushOut").textContent = data ? (brushBytes()/1024).toFixed(1)+"kb" : $("brushSize").value+"px";
+}
+$("brushSize").addEventListener("input", syncBrushOut);
+
+function syncLockSlider(){
+  // slider maps 0..100 → 0 .. 4×headerGuess (default position = headerGuess)
+  const max = Math.max(headerGuess*4, 256);
+  $("lockSlider").value = headerGuess ? Math.round(lockEnd/max*100) : 0;
+  $("lockOut").textContent = lockEnd+"b";
+  syncBrushOut();
+}
+$("lockSlider").addEventListener("input", ()=>{
+  const max = Math.max(headerGuess*4, 256);
+  lockEnd = Math.min(data?data.length:0, Math.round(+$("lockSlider").value/100*max));
+  $("lockOut").textContent = lockEnd+"b";
+  paintField();
+});
+
+/* ---------------- utility buttons ---------------- */
+$("undoBtn").onclick = ()=>{
+  const patches = undoStack.pop();
+  if(!patches) return;
+  for(let i=patches.length-1;i>=0;i--) data.set(patches[i].bytes, patches[i].off);
+  $("undoBtn").disabled = undoStack.length===0;
+  paintField(); schedulePreview(true);
+};
+
+$("chaosBtn").onclick = ()=>{
+  // one-shot: random brush hits sprayed across the unlocked region
+  const patches=[]; const names=Object.keys(BRUSHES);
+  const span = data.length-lockEnd;
+  if(span<16) return;
+  const hits = 6+rnd(10);
+  for(let k=0;k<hits;k++){
+    const n = Math.max(8, rnd(span>>4));
+    const a = lockEnd + rnd(span-n), b=a+n;
+    patches.push({off:a, bytes:data.slice(a,b)});
+    BRUSHES[names[rnd(names.length)]](data,a,b);
+  }
+  undoStack.push(patches);
+  if(undoStack.length>UNDO_MAX) undoStack.shift();
+  $("undoBtn").disabled=false;
+  paintField(); schedulePreview(true);
+};
+
+$("resetBtn").onclick = ()=>{
+  data.set(original);
+  undoStack=[]; $("undoBtn").disabled=true;
+  paintField(); schedulePreview(true);
+};
+
+$("exportBtn").onclick = ()=>{
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(currentBlob());
+  const dot=fileName.lastIndexOf(".");
+  a.download = dot>0 ? fileName.slice(0,dot)+".glit"+fileName.slice(dot) : fileName+".glit";
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+};
+
+$("crcFix").addEventListener("change", ()=>schedulePreview(true));
+
+sizeField();
+syncBrushOut();
+</script>
+</body>
+</html>
