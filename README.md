@@ -16,13 +16,32 @@ Everything runs client-side in one `index.html`. Nothing is uploaded anywhere.
 - The file's raw bytes fill the **data field** (right/bottom panel), one pixel
   per slice of file. Drag a finger or cursor across it to corrupt the bytes
   under your touch. The preview re-decodes live as you scrub.
-- **Brushes** are real byte operations:
-  - `SMEAR` — repeat one byte across the range
+- **Brushes** are real byte operations (every drawing metaphor targets the
+  data layer, never the pixels):
+  - `SMEAR` — directional smudge: drags and stretches the bytes along your
+    stroke
   - `SCRAMBLE` — shuffle the bytes in place
   - `STUTTER` — copy a small chunk and repeat it (the classic copy-paste move)
   - `FLIP` — flip random bits
-  - `CLONE` — paste bytes grabbed from elsewhere in the file
-  - `REVERSE`, `SORT`, `ZERO` — what they say
+  - `SPIN` — keeps rotating the bytes under the brush for as long as your
+    finger is down, even without moving
+  - `CLONE` — clone stamp: first tap sets a source point (cyan marker), then
+    draw anywhere and the source (dashed green marker) travels with your
+    stroke, copying from one to the other
+  - `PIXEL` — quantize: posterizes values and blockifies positions
+  - `LIGHT` / `DARK` — shift byte values up/down (brightens/darkens the data
+    field, and whatever that does downstream)
+  - `GRAD`, `WHITE`, `ZERO` — pencils: draw a clean 0→255 ramp, 0xFF ink
+    ("blank"/eraser), or 0x00 ink straight onto the data
+  - `REVERSE`, `SORT` — what they say
+- **Brush cursor** — a dot with a faint circle stands in for your finger on
+  the data field; the circle scales with brush size.
+- **BAKE / ROT ⟳ / FLIP ↔ ↕** (images) — rasterize whatever the decoder
+  currently shows and re-encode it as a clean file. The glitch state becomes
+  the new base layer, ready to corrupt again — the classic corrupt → flatten →
+  corrupt cycle. ROT is the move when your glitches keep streaking one way:
+  rotate, glitch across the other axis, rotate back. Rotation and flips bake
+  as they go (they have to — the bytes are a whole new file after re-encoding).
 - **Structure awareness.** GLIT parses the file's anatomy on load — JPEG
   markers, PNG chunks, GIF blocks, RIFF chunks, ISO boxes (MP4/MOV/HEIC/HEIF/
   AVIF), PDF objects/streams/xref. Region boundaries show as white ticks on
