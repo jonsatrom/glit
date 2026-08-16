@@ -73,6 +73,27 @@
     position:absolute;top:.3rem;right:.4rem;font-size:.55rem;color:#555;
     pointer-events:none;letter-spacing:.15em;
   }
+  #brushCursor{
+    position:absolute;border:1px solid #ffffffaa;border-radius:50%;
+    pointer-events:none;display:none;transform:translate(-50%,-50%);
+    box-shadow:0 0 0 1px #0008, inset 0 0 6px #0006;
+  }
+  #brushCursor::after{
+    content:"";position:absolute;left:50%;top:50%;width:5px;height:5px;
+    background:var(--hot);border-radius:50%;transform:translate(-50%,-50%);
+    box-shadow:0 0 4px var(--hot);
+  }
+  .mark{
+    position:absolute;width:12px;height:12px;border:1.5px solid var(--cyan);
+    border-radius:50%;pointer-events:none;transform:translate(-50%,-50%);
+    display:none;
+  }
+  .mark::after{
+    content:"";position:absolute;left:50%;top:50%;width:3px;height:3px;
+    background:var(--cyan);border-radius:50%;transform:translate(-50%,-50%);
+  }
+  #cloneGhost{border-style:dashed;border-color:var(--acid)}
+  #cloneGhost::after{background:var(--acid)}
 
   /* ---------- controls ---------- */
   #controls{flex:none;padding:.45rem .5rem .65rem;display:flex;flex-direction:column;gap:.45rem;background:var(--panel)}
@@ -117,9 +138,18 @@
     <div id="fieldWrap">
       <canvas id="field"></canvas>
       <span id="fieldLabel">RAW BYTES → PIXELS · DRAG TO CORRUPT</span>
+      <div id="brushCursor"></div>
+      <div id="cloneMark" class="mark"></div>
+      <div id="cloneGhost" class="mark"></div>
     </div>
     <div id="controls">
       <div class="row" id="brushRow"></div>
+      <div class="row" id="imgOps" style="display:none">
+        <button class="util" id="bakeBtn">BAKE</button>
+        <button class="util" id="rotBtn">ROT ⟳ 90°</button>
+        <button class="util" id="flipHBtn">FLIP ↔</button>
+        <button class="util" id="flipVBtn">FLIP ↕</button>
+      </div>
       <div class="row">
         <span class="sl">BRUSH <input type="range" id="brushSize" min="1" max="100" value="18"><output id="brushOut"></output></span>
         <span class="sl">LOCK HEAD <input type="range" id="lockSlider" min="0" max="100" value="0"><output id="lockOut"></output></span>
@@ -163,30 +193,54 @@ const UNDO_MAX = 40;
 
 /* ---------------- brushes: real byte surgery ---------------- */
 const rnd = n => (Math.random()*n)|0;
+const clamp8 = v => v<0?0:v>255?255:v;
+let strokeDir = 1;       // ±1, which way the scrub is moving through the file
+let cloneSrc = null;     // byte offset of the clone source (first tap)
+let cloneDelta = null;   // stroke↔source offset, fixed at each stroke start
 
 const BRUSHES = {
-  SMEAR:    (d,a,b)=>{ const v=d[a]; d.fill(v,a,b); },
+  // directional smudge: drags/stretches the bytes along the stroke
+  SMEAR:    (d,a,b)=>{ const n=b-a, s=Math.max(1,n>>2);
+                       if(strokeDir>=0) d.copyWithin(a+s,a,b-s);
+                       else d.copyWithin(a,a+s,b); },
   SCRAMBLE: (d,a,b)=>{ for(let i=b-1;i>a;i--){ const j=a+rnd(i-a+1),t=d[i];d[i]=d[j];d[j]=t; } },
   STUTTER:  (d,a,b)=>{ const n=b-a, cs=Math.max(2,Math.min(n, 4+rnd(60)));
                        for(let i=a+cs;i<b;i++) d[i]=d[a+((i-a)%cs)]; },
   FLIP:     (d,a,b)=>{ const n=b-a, hits=Math.max(1,n>>3);
                        for(let k=0;k<hits;k++){ const i=a+rnd(n); d[i]^=1<<rnd(8); } },
-  CLONE:    (d,a,b)=>{ const n=b-a, max=d.length-n;
-                       if(max<=0) return;
-                       const src=rnd(max);          // reading locked bytes is fine
-                       d.copyWithin(a, src, src+n); },
+  // keeps turning the bytes under the brush while the finger is down
+  SPIN:     (d,a,b)=>{ const n=b-a, s=Math.max(1,n>>4);
+                       const tmp=d.slice(a,a+s); d.copyWithin(a,a+s,b); d.set(tmp,b-s); },
+  // clone stamp: tap 1 sets the source, strokes copy source→brush
+  CLONE:    (d,a,b)=>{ if(cloneDelta===null) return;
+                       const n=b-a;
+                       const src=Math.max(0,Math.min(d.length-n,a-cloneDelta));
+                       if(src!==a) d.copyWithin(a,src,src+n); },
+  // quantize: posterize values and blockify positions
+  PIXEL:    (d,a,b)=>{ const n=b-a, blk=Math.max(2,n>>5);
+                       for(let i=a;i<b;i+=blk) d.fill(d[i]&0xE0,i,Math.min(b,i+blk)); },
+  LIGHT:    (d,a,b)=>{ for(let i=a;i<b;i++) d[i]=clamp8(d[i]+20); },
+  DARK:     (d,a,b)=>{ for(let i=a;i<b;i++) d[i]=clamp8(d[i]-20); },
+  // pencils: ink flat values / a clean ramp onto the data
+  GRAD:     (d,a,b)=>{ const n=(b-a-1)||1; for(let i=a;i<b;i++) d[i]=Math.round((i-a)*255/n); },
+  WHITE:    (d,a,b)=>{ d.fill(255,a,b); },
+  ZERO:     (d,a,b)=>{ d.fill(0,a,b); },
   REVERSE:  (d,a,b)=>{ for(let i=a,j=b-1;i<j;i++,j--){ const t=d[i];d[i]=d[j];d[j]=t; } },
   SORT:     (d,a,b)=>{ d.subarray(a,b).sort(); },
-  ZERO:     (d,a,b)=>{ d.fill(0,a,b); },
 };
 let brushName = "SMEAR";
+
+function hideCloneMarks(){ $("cloneMark").style.display="none"; $("cloneGhost").style.display="none"; }
 
 const brushRow = $("brushRow");
 for(const name of Object.keys(BRUSHES)){
   const btn = document.createElement("button");
   btn.textContent = name; btn.className = "brush"+(name===brushName?" on":"");
   btn.onclick = ()=>{ brushName = name;
-    brushRow.querySelectorAll(".brush").forEach(x=>x.classList.toggle("on",x===btn)); };
+    brushRow.querySelectorAll(".brush").forEach(x=>x.classList.toggle("on",x===btn));
+    cloneSrc=null; cloneDelta=null; hideCloneMarks();
+    if(name==="CLONE") $("hexPeek").textContent="CLONE · tap the field to set the source, then draw elsewhere to stamp it";
+  };
   brushRow.appendChild(btn);
 }
 
@@ -438,7 +492,12 @@ function corruptRange(a,b,fn,patches){
   if(cur<b) segs.push([cur,b]);
   for(const [sa,sb] of segs){
     if(sb-sa<2) continue;
-    patches.push({off:sa, bytes:data.slice(sa,sb)});
+    // a held SPIN re-hits the same range every tick — record it once
+    const key=sa+":"+sb;
+    if(!strokeSeen || !strokeSeen.has(key)){
+      patches.push({off:sa, bytes:data.slice(sa,sb)});
+      if(strokeSeen) strokeSeen.add(key);
+    }
     fn(data,sa,sb);
     hit=true;
     if(!strokeDirty) strokeDirty={min:sa,max:sb};
@@ -449,22 +508,61 @@ function corruptRange(a,b,fn,patches){
 }
 function applyBrushAt(off){
   const half = brushBytes()>>1;
-  if(!corruptRange(off-half, off+half, BRUSHES[brushName], strokePatches)) { peekHex(off); return; }
+  const hit = corruptRange(off-half, off+half, BRUSHES[brushName], strokePatches);
+  if(brushName==="CLONE" && cloneDelta!==null) placeMark($("cloneGhost"), off-cloneDelta);
   peekHex(off);
-  schedulePreview();
+  if(hit) schedulePreview();
 }
 
-let scrubbing=false, lastOff=-1;
+/* place a marker div at a byte offset's position on the field */
+function placeMark(el, off){
+  const total=fieldW*fieldH, p=Math.floor(off/data.length*total);
+  const r=field.getBoundingClientRect();
+  el.style.left=((p%fieldW)+0.5)/fieldW*r.width+"px";
+  el.style.top=(Math.floor(p/fieldW)+0.5)/fieldH*r.height+"px";
+  el.style.display="block";
+}
+
+/* brush cursor: dot + faint circle standing in for the finger */
+const cursor = $("brushCursor");
+function sizeCursor(){
+  const d = Math.max(16, +$("brushSize").value*1.6);
+  cursor.style.width=cursor.style.height=d+"px";
+}
+function moveCursor(e){
+  const r=field.parentElement.getBoundingClientRect();
+  cursor.style.left=(e.clientX-r.left)+"px";
+  cursor.style.top=(e.clientY-r.top)+"px";
+  cursor.style.display="block";
+}
+field.addEventListener("pointerleave", ()=>{ if(!scrubbing) cursor.style.display="none"; });
+
+let scrubbing=false, lastOff=-1, strokeSeen=null, spinTimer=0;
 field.addEventListener("pointerdown", e=>{
   if(!data) return;
+  moveCursor(e);
+  const off = eventOffset(e);
+  // CLONE first tap: set the source, don't corrupt
+  if(brushName==="CLONE" && cloneSrc===null){
+    cloneSrc=off;
+    placeMark($("cloneMark"), off);
+    $("hexPeek").textContent =
+      `CLONE · source set at 0x${off.toString(16).padStart(8,"0")} — now draw where it should land`;
+    return;
+  }
   field.setPointerCapture(e.pointerId);
-  scrubbing=true; strokePatches=[]; strokeDirty=null;
-  lastOff = eventOffset(e);
-  applyBrushAt(lastOff);
+  scrubbing=true; strokePatches=[]; strokeDirty=null; strokeSeen=new Set();
+  if(brushName==="CLONE") cloneDelta = off - cloneSrc;
+  lastOff=off; strokeDir=1;
+  applyBrushAt(off);
+  if(brushName==="SPIN")
+    spinTimer=setInterval(()=>{ if(scrubbing) applyBrushAt(lastOff); }, 45);
 });
 field.addEventListener("pointermove", e=>{
+  moveCursor(e);
   if(!scrubbing||!data) return;
   const off = eventOffset(e);
+  if(off!==lastOff) strokeDir = off>lastOff ? 1 : -1;
   // interpolate so fast swipes corrupt a continuous ribbon of bytes
   const step = Math.max(1, brushBytes()>>1);
   const dist = Math.abs(off-lastOff);
@@ -472,9 +570,12 @@ field.addEventListener("pointermove", e=>{
   for(let i=1;i<=n;i++) applyBrushAt(lastOff + (off-lastOff)*i/n | 0);
   lastOff=off;
 });
-function endStroke(){
+function endStroke(e){
+  if(spinTimer){ clearInterval(spinTimer); spinTimer=0; }
+  if(e && e.pointerType==="touch") cursor.style.display="none";
+  $("cloneGhost").style.display="none";
   if(!scrubbing) return;
-  scrubbing=false;
+  scrubbing=false; strokeSeen=null;
   if(strokePatches && strokePatches.length){
     undoStack.push(strokePatches);
     if(undoStack.length>UNDO_MAX) undoStack.shift();
@@ -550,6 +651,7 @@ function loadFile(file){
     undoStack=[]; $("undoBtn").disabled=true;
     ["chaosBtn","resetBtn","exportBtn"].forEach(id=>$(id).disabled=false);
     $("dropHint").style.display="none";
+    cloneSrc=null; cloneDelta=null; hideCloneMarks();
 
     const st = analyze(data);
     regions = st.regions; structLocks = st.structLocks;
@@ -577,6 +679,7 @@ function loadFile(file){
       mediaEl.style.cssText="color:#8a8a99;font-size:.7rem;padding:1rem;text-align:center";
       mediaEl.textContent="no decoder for this type — scrub anyway, then EXPORT and open it elsewhere";
     }
+    $("imgOps").style.display = previewKind==="img" ? "flex" : "none";
     previewPane.insertBefore(mediaEl, $("hexPeek"));
     sizeField();
     renderPreview();
@@ -591,7 +694,7 @@ addEventListener("drop", e=>{ e.preventDefault(); if(e.dataTransfer.files[0]) lo
 function syncBrushOut(){
   $("brushOut").textContent = data ? (brushBytes()/1024).toFixed(1)+"kb" : $("brushSize").value+"px";
 }
-$("brushSize").addEventListener("input", syncBrushOut);
+$("brushSize").addEventListener("input", ()=>{ syncBrushOut(); sizeCursor(); });
 
 function syncLockSlider(){
   // slider maps 0..100 → 0 .. 4×headerGuess (default position = headerGuess)
@@ -654,8 +757,58 @@ $("exportBtn").onclick = ()=>{
 
 $("crcFix").addEventListener("change", ()=>schedulePreview(true));
 
+/* ---------------- bake / rotate / flip (images) -----------------------
+   Rasterize whatever the decoder currently shows and re-encode it as a
+   clean file: the glitch state becomes the new base layer, ready to be
+   corrupted again. Rotation/flips ride the same pipeline. */
+function flashBadge(msg){
+  const b=$("brokenBadge");
+  b.textContent=msg; b.style.display="block";
+  setTimeout(()=>{ b.style.display="none";
+    b.textContent="DECODER CHOKED — data is still yours"; }, 1600);
+}
+function transformBake(op){
+  if(previewKind!=="img" || !mediaEl.naturalWidth){
+    flashBadge("NOTHING TO BAKE — decoder shows no pixels"); return;
+  }
+  const w=mediaEl.naturalWidth, h=mediaEl.naturalHeight;
+  const c=document.createElement("canvas");
+  c.width = op==="rot" ? h : w;
+  c.height = op==="rot" ? w : h;
+  const g=c.getContext("2d");
+  if(op==="rot"){ g.translate(h,0); g.rotate(Math.PI/2); }
+  else if(op==="flipH"){ g.translate(w,0); g.scale(-1,1); }
+  else if(op==="flipV"){ g.translate(0,h); g.scale(1,-1); }
+  g.drawImage(mediaEl,0,0);
+  const type = /image\/(jpeg|png|webp)/.test(fileType) ? fileType : "image/png";
+  c.toBlob(async blob=>{
+    if(!blob){ flashBadge("BAKE FAILED — could not re-encode"); return; }
+    data = new Uint8Array(await blob.arrayBuffer());
+    original = data.slice();                      // baked state = new base layer
+    if(type!==fileType){
+      const ext={"image/jpeg":".jpg","image/png":".png","image/webp":".webp"}[type];
+      fileName = fileName.replace(/\.[^.]*$/,"")+ext;
+      fileType = type;
+    }
+    const st = analyze(data);
+    regions=st.regions; structLocks=st.structLocks;
+    headerGuess=st.headEnd; lockEnd=headerGuess;
+    $("structTog").style.display = structLocks.length ? "flex" : "none";
+    $("crcTog").style.display = isPng() ? "flex" : "none";
+    undoStack=[]; $("undoBtn").disabled=true;
+    cloneSrc=null; cloneDelta=null; hideCloneMarks();
+    $("fileName").textContent = `${fileName} · ${(data.length/1024).toFixed(1)}kb`;
+    rebuildLocks(); syncLockSlider(); paintField(); renderPreview();
+  }, type, 0.92);
+}
+$("bakeBtn").onclick  = ()=>transformBake("bake");
+$("rotBtn").onclick   = ()=>transformBake("rot");
+$("flipHBtn").onclick = ()=>transformBake("flipH");
+$("flipVBtn").onclick = ()=>transformBake("flipV");
+
 sizeField();
 syncBrushOut();
+sizeCursor();
 </script>
 </body>
 </html>
