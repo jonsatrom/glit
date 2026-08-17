@@ -37,11 +37,15 @@ Everything runs client-side in one `index.html`. Nothing is uploaded anywhere.
 - **Brush cursor** — a dot with a faint circle stands in for your finger on
   the data field; the circle scales with brush size.
 - **BAKE / ROT ⟳ / FLIP ↔ ↕** (images) — rasterize whatever the decoder
-  currently shows and re-encode it as a clean file. The glitch state becomes
-  the new base layer, ready to corrupt again — the classic corrupt → flatten →
-  corrupt cycle. ROT is the move when your glitches keep streaking one way:
-  rotate, glitch across the other axis, rotate back. Rotation and flips bake
-  as they go (they have to — the bytes are a whole new file after re-encoding).
+  currently shows and re-encode it as a clean, legit file. The glitch state
+  becomes the new base layer, ready to corrupt again — the classic corrupt →
+  flatten → corrupt cycle. The transparency checkerboard is baked in below
+  the glitch layer, so transparent pixels and undecoded gray dead zones
+  become real, fully corruptible data. If the decoder has choked completely,
+  BAKE falls back to the last frame that decoded at all. ROT is the move when
+  your glitches keep streaking one way: rotate, glitch across the other axis,
+  rotate back. Rotation and flips bake as they go (they have to — the bytes
+  are a whole new file after re-encoding).
 - **Structure awareness.** GLIT parses the file's anatomy on load — JPEG
   markers, PNG chunks, GIF blocks, RIFF chunks, ISO boxes (MP4/MOV/HEIC/HEIF/
   AVIF), PDF objects/streams/xref. Region boundaries show as white ticks on
@@ -68,8 +72,9 @@ Everything runs client-side in one `index.html`. Nothing is uploaded anywhere.
 - **PNG CRC FIX** (PNGs only): browsers refuse PNGs with bad chunk checksums,
   so this recomputes the CRCs — the corruption stays, the decoder just stops
   vetoing it. Applies to preview and export.
-- `UNDO` (per stroke), `CHAOS` (spray random corruption everywhere), `RESET`,
-  and `EXPORT` (downloads `name.glit.ext`).
+- `UNDO` (per stroke), `CHAOS` (spray random corruption everywhere), `RESET`
+  (full reset — all the way back to the file as you opened it, through any
+  number of bakes), and `EXPORT` (downloads `name.glit.ext`).
 - The hex readout at the bottom of the preview shows the bytes under your
   finger as you scrub.
 
